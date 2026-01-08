@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+:root {
+  /* 結婚式テーマ: ゴールドと白 */
+  --gold-primary: #d4af37;
+  --gold-light: #f4e4bc;
+  --gold-dark: #b8941f;
+  --gold-accent: #ffd700;
+  --white: #ffffff;
+  --cream: #faf8f3;
+  --text-dark: #2c2c2c;
+  --text-light: #666666;
+  --shadow-gold: rgba(212, 175, 55, 0.3);
+}
+
+@theme inline {
+  --color-gold-primary: var(--gold-primary);
+  --color-gold-light: var(--gold-light);
+  --color-gold-dark: var(--gold-dark);
+  --color-gold-accent: var(--gold-accent);
+  --color-cream: var(--cream);
+  --font-serif: var(--font-serif);
+}
+
+body {
+  background: var(--white);
+  color: var(--text-dark);
+  font-family: var(--font-serif), serif;
+}
+
+/* ボタンアニメーション */
+@keyframes button-press {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.95);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.button-gold {
+  background: linear-gradient(135deg, var(--gold-primary) 0%, var(--gold-dark) 100%);
+  box-shadow: 0 4px 15px var(--shadow-gold);
+  transition: all 0.3s ease;
+}
+
+.button-gold:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px var(--shadow-gold);
+}
+
+.button-gold:active {
+  animation: button-press 0.2s ease;
+}
+
+.button-gold:disabled {
+  background: #e0e0e0;
+  color: #999999;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ゴールドのグラデーション背景 */
+.bg-gold-gradient {
+  background: linear-gradient(135deg, var(--gold-light) 0%, var(--white) 50%, var(--gold-light) 100%);
+}
+
+/* フェードインアニメーション */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.5s ease-out;
+}
+
+/* 順位表示のアニメーション */
+@keyframes rankPulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.7);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 20px rgba(212, 175, 55, 0);
+  }
+}
+
+.rank-pulse {
+  animation: rankPulse 2s ease-in-out infinite;
+}
