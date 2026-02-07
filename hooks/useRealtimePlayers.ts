@@ -27,6 +27,11 @@ export function useRealtimePlayers(roomId: string | null) {
           .order('score', { ascending: false });
 
         if (fetchError) throw fetchError;
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'hooks/useRealtimePlayers.ts:30',message:'プレイヤーリスト取得',data:{roomId:roomId,playersCount:data?.length,players:data?.map(p=>({id:p.id,name:p.name,score:p.score}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        
         setPlayers(data || []);
         setError(null);
       } catch (err) {

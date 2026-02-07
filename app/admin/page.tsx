@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { supabase, type Room, type Question } from '@/lib/supabase/client';
 import { useRealtimeRoom } from '@/hooks/useRealtimeRoom';
 import { useRealtimePlayers } from '@/hooks/useRealtimePlayers';
+import { useRealtimeAnswers } from '@/hooks/useRealtimeAnswers';
 
 export default function AdminPage() {
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -11,6 +12,7 @@ export default function AdminPage() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const { room, loading: roomLoading } = useRealtimeRoom(roomId);
   const { players, loading: playersLoading } = useRealtimePlayers(roomId);
+  const { answerCount } = useRealtimeAnswers(room?.current_question_id ?? null);
   
   // 問題管理用のstate
   const [showQuestionForm, setShowQuestionForm] = useState(false);
@@ -559,6 +561,12 @@ export default function AdminPage() {
                     : '待機中'}
             </span>
           </p>
+          {room?.current_question_id != null && (
+            <p className="mb-2">
+              <span className="font-semibold">回答者数:</span>{' '}
+              <span className="font-bold text-green-700">{answerCount}人</span>
+            </p>
+          )}
         </div>
 
         {currentQuestion && (
@@ -643,11 +651,21 @@ export default function AdminPage() {
             <p className="text-gray-600">参加者がいません</p>
           ) : (
             <div className="space-y-2">
-              {players.map((player, index) => (
+              {(() => {
+                // 順位を計算（点数の重複をまとめ、上から1番目の点数=1位、2番目=2位、3番目=3位）
+                const distinctScores: number[] = [];
+                for (const p of sortedPlayers) {
+                  if (distinctScores[distinctScores.length - 1] !== p.score) distinctScores.push(p.score);
+                }
+                const scoreToRank: Record<number, number> = {};
+                distinctScores.forEach((score, i) => { scoreToRank[score] = i + 1; });
+                const playersWithRank = sortedPlayers.map((p) => ({ ...p, rank: scoreToRank[p.score] ?? 0 }));
+                return playersWithRank;
+              })().map((player) => (
                 <div
                   key={player.id}
                   className={`flex items-center justify-between p-4 rounded-lg ${
-                    index === 0 && players[0].score > 0
+                    player.rank === 1 && player.score > 0
                       ? 'bg-yellow-50 border-2 border-yellow-300'
                       : 'bg-gray-50 border border-gray-200'
                   }`}
@@ -655,16 +673,16 @@ export default function AdminPage() {
                   <div className="flex items-center gap-4">
                     <div
                       className={`flex items-center justify-center w-10 h-10 rounded-full font-bold text-lg ${
-                        index === 0 && players[0].score > 0
+                        player.rank === 1 && player.score > 0
                           ? 'bg-yellow-400 text-yellow-900'
                           : 'bg-gray-300 text-gray-700'
                       }`}
                     >
-                      {index + 1}
+                      {player.rank}
                     </div>
                     <div>
                       <p className="text-lg font-semibold text-gray-800">{player.name}</p>
-                      {index === 0 && players[0].score > 0 && (
+                      {player.rank === 1 && player.score > 0 && (
                         <p className="text-sm text-yellow-700 font-semibold">🏆 1位</p>
                       )}
                     </div>

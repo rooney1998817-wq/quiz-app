@@ -6,6 +6,9 @@ import { supabase, type Question } from '@/lib/supabase/client';
 import { useRealtimeRoom } from '@/hooks/useRealtimeRoom';
 import { useRealtimePlayers } from '@/hooks/useRealtimePlayers';
 
+const SESSION_KEY_ROOM = 'quiz_room_id';
+const SESSION_KEY_PLAYER = 'quiz_player_id';
+
 function JoinContent() {
   const searchParams = useSearchParams();
   const roomId = searchParams.get('room');
@@ -13,10 +16,44 @@ function JoinContent() {
   const { players, loading: playersLoading } = useRealtimePlayers(roomId);
   const [playerName, setPlayerName] = useState('');
   const [playerId, setPlayerId] = useState<string | null>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
   const [hasAnswered, setHasAnswered] = useState(false);
   const [selectedAnswer, setSelectedAnswer] = useState<'A' | 'B' | 'C' | 'D' | null>(null);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
+
+  // セッション復元（リロード時）：同じルームの参加者なら復元
+  useEffect(() => {
+    if (!roomId || sessionChecked) return;
+
+    const storedRoomId = typeof window !== 'undefined' ? sessionStorage.getItem(SESSION_KEY_ROOM) : null;
+    const storedPlayerId = typeof window !== 'undefined' ? sessionStorage.getItem(SESSION_KEY_PLAYER) : null;
+
+    if (storedRoomId === roomId && storedPlayerId) {
+      const verifyAndRestore = async () => {
+        const { data, error } = await supabase
+          .from('players')
+          .select('id, room_id')
+          .eq('id', storedPlayerId)
+          .single();
+
+        if (!error && data && data.room_id === roomId) {
+          setPlayerId(data.id);
+        } else {
+          sessionStorage.removeItem(SESSION_KEY_ROOM);
+          sessionStorage.removeItem(SESSION_KEY_PLAYER);
+        }
+        setSessionChecked(true);
+      };
+      verifyAndRestore();
+    } else {
+      if (storedRoomId !== roomId && (storedRoomId || storedPlayerId)) {
+        sessionStorage.removeItem(SESSION_KEY_ROOM);
+        sessionStorage.removeItem(SESSION_KEY_PLAYER);
+      }
+      setSessionChecked(true);
+    }
+  }, [roomId, sessionChecked]);
 
   // 現在の問題を取得（Realtimeで自動更新）
   useEffect(() => {
@@ -100,14 +137,35 @@ function JoinContent() {
   // 正解発表状態の判定
   const isRevealed = room?.status === 'revealed';
 
-  // 参加処理
+  // 参加処理（同名が既にいればそのデータを引き継ぎ、いなければ新規作成）
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!playerName.trim() || !roomId) return;
 
+    const name = playerName.trim();
+
+    // 同じルームに同じ名前の参加者がいないか確認
+    const { data: existingPlayer } = await supabase
+      .from('players')
+      .select('id')
+      .eq('room_id', roomId)
+      .eq('name', name)
+      .maybeSingle();
+
+    if (existingPlayer) {
+      // 既存の参加者として引き継ぎ
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem(SESSION_KEY_ROOM, roomId);
+        sessionStorage.setItem(SESSION_KEY_PLAYER, existingPlayer.id);
+      }
+      setPlayerId(existingPlayer.id);
+      return;
+    }
+
+    // 新規参加
     const { data, error } = await supabase
       .from('players')
-      .insert([{ name: playerName.trim(), room_id: roomId }])
+      .insert([{ name, room_id: roomId }])
       .select()
       .single();
 
@@ -117,44 +175,133 @@ function JoinContent() {
       return;
     }
 
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem(SESSION_KEY_ROOM, roomId);
+      sessionStorage.setItem(SESSION_KEY_PLAYER, data.id);
+    }
     setPlayerId(data.id);
   };
 
   // 回答送信
   const handleAnswer = async (answer: 'A' | 'B' | 'C' | 'D') => {
-    if (!playerId || !currentQuestion || hasAnswered) return;
+    if (!playerId || !currentQuestion || isRevealed) return;
+
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:124',message:'回答送信開始',data:{playerId:playerId,questionId:currentQuestion.id,selectedAnswer:answer},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
 
     const isCorrect = answer === currentQuestion.correct_answer;
 
-    const { error } = await supabase.from('answers').insert([
-      {
-        player_id: playerId,
-        question_id: currentQuestion.id,
-        selected_answer: answer,
-        is_correct: isCorrect,
-        answered_at: new Date().toISOString(),
-      },
-    ]);
+    // 既存の回答をチェック
+    const { data: existingAnswer } = await supabase
+      .from('answers')
+      .select('id, is_correct')
+      .eq('player_id', playerId)
+      .eq('question_id', currentQuestion.id)
+      .maybeSingle();
 
-    if (error) {
-      console.error('回答送信エラー:', error);
-      alert('回答の送信に失敗しました');
-      return;
-    }
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:135',message:'既存回答確認',data:{hasExistingAnswer:!!existingAnswer,existingIsCorrect:existingAnswer?.is_correct,newIsCorrect:isCorrect},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
 
-    // 正解の場合、スコアを更新
-    if (isCorrect) {
+    // 既存の回答がある場合は更新、ない場合は挿入
+    if (existingAnswer) {
+      const { error } = await supabase
+        .from('answers')
+        .update({
+          selected_answer: answer,
+          is_correct: isCorrect,
+          answered_at: new Date().toISOString(),
+        })
+        .eq('id', existingAnswer.id);
+
+      if (error) {
+        console.error('回答更新エラー:', error);
+        alert('回答の更新に失敗しました');
+        return;
+      }
+
+      // スコアの更新（前回の回答と今回の回答を比較）
       const { data: player } = await supabase
         .from('players')
-        .select('score')
+        .select('score, name')
         .eq('id', playerId)
         .single();
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:155',message:'スコア取得',data:{playerId:playerId,playerName:player?.name,currentScore:player?.score},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+
       if (player) {
-        await supabase
+        let scoreChange = 0;
+        // 前回が正解で今回が不正解の場合：スコアを-1
+        if (existingAnswer.is_correct && !isCorrect) {
+          scoreChange = -1;
+        }
+        // 前回が不正解で今回が正解の場合：スコアを+1
+        else if (!existingAnswer.is_correct && isCorrect) {
+          scoreChange = 1;
+        }
+
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:172',message:'スコア更新前',data:{playerId:playerId,playerName:player.name,currentScore:player.score,scoreChange:scoreChange,newScore:player.score+scoreChange},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+
+        if (scoreChange !== 0) {
+          const { data: updatedPlayer, error: updateError } = await supabase
+            .from('players')
+            .update({ score: player.score + scoreChange })
+            .eq('id', playerId)
+            .select('score, name')
+            .single();
+
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:177',message:'スコア更新後',data:{playerId:playerId,playerName:updatedPlayer?.name,updatedScore:updatedPlayer?.score,updateError:updateError?.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+        }
+      }
+    } else {
+      // 新しい回答を挿入
+      const { error } = await supabase.from('answers').insert([
+        {
+          player_id: playerId,
+          question_id: currentQuestion.id,
+          selected_answer: answer,
+          is_correct: isCorrect,
+          answered_at: new Date().toISOString(),
+        },
+      ]);
+
+      if (error) {
+        console.error('回答送信エラー:', error);
+        alert('回答の送信に失敗しました');
+        return;
+      }
+
+      // 正解の場合、スコアを更新
+      if (isCorrect) {
+        const { data: player } = await supabase
           .from('players')
-          .update({ score: player.score + 1 })
-          .eq('id', playerId);
+          .select('score, name')
+          .eq('id', playerId)
+          .single();
+
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:199',message:'新規回答スコア取得',data:{playerId:playerId,playerName:player?.name,currentScore:player?.score},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+
+        if (player) {
+          const { data: updatedPlayer, error: updateError } = await supabase
+            .from('players')
+            .update({ score: player.score + 1 })
+            .eq('id', playerId)
+            .select('score, name')
+            .single();
+
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/160c7f9d-6932-43c6-a470-5603bd743c30',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/join/page.tsx:207',message:'新規回答スコア更新後',data:{playerId:playerId,playerName:updatedPlayer?.name,updatedScore:updatedPlayer?.score,updateError:updateError?.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+        }
       }
     }
 
@@ -163,7 +310,7 @@ function JoinContent() {
     setIsCorrect(isCorrect);
   };
 
-  if (roomLoading || !roomId) {
+  if (roomLoading || !roomId || !sessionChecked) {
     return (
       <div className="flex min-h-screen items-center justify-center" style={{ backgroundColor: '#faf8f3' }}>
         <div className="text-2xl text-[#d4af37]">読み込み中...</div>
@@ -234,6 +381,15 @@ function JoinContent() {
             const sortedPlayers = [...players].sort((a, b) => b.score - a.score);
             const revealedRank = room?.revealed_rank || 0;
             
+            // 順位を計算（点数の重複をまとめ、上から1番目の点数=1位、2番目=2位、3番目=3位）
+            const distinctScores: number[] = [];
+            for (const p of sortedPlayers) {
+              if (distinctScores[distinctScores.length - 1] !== p.score) distinctScores.push(p.score);
+            }
+            const scoreToRank: Record<number, number> = {};
+            distinctScores.forEach((score, i) => { scoreToRank[score] = i + 1; });
+            const playersWithRank = sortedPlayers.map((p) => ({ ...p, rank: scoreToRank[p.score] ?? 0 }));
+            
             // 発表された順位を累積表示（3位→2位→1位の順で追加）
             // revealedRankが3の場合は3位のみ、2の場合は3位と2位、1の場合は3位、2位、1位を表示
             const ranksToShow: number[] = [];
@@ -245,7 +401,8 @@ function JoinContent() {
               ranksToShow.push(3, 2, 1); // 3位、2位、1位
             }
             
-            const playersToShow = sortedPlayers.filter((_, index) => ranksToShow.includes(index + 1));
+            // 発表された順位のプレイヤーを表示（同点の場合は同じ順位のプレイヤーも含む）
+            const playersToShow = playersWithRank.filter((player) => ranksToShow.includes(player.rank));
 
             if (revealedRank === 0) {
               return (
@@ -260,18 +417,17 @@ function JoinContent() {
                 <h2 className="text-3xl font-bold text-[#d4af37] text-center mb-6">
                   {revealedRank === 3 ? '3位発表！' : revealedRank === 2 ? '2位発表！' : '1位発表！'}
                 </h2>
-                {playersToShow.map((player, arrayIndex) => {
-                  const actualIndex = sortedPlayers.indexOf(player);
-                  const isTop3 = actualIndex < 3;
+                {playersToShow.map((player) => {
+                  const isTop3 = player.rank <= 3;
                   const rankColors = [
                     { bg: 'bg-gradient-to-r from-yellow-400 to-yellow-600', border: 'border-yellow-500', text: 'text-yellow-900', medal: '🥇' },
                     { bg: 'bg-gradient-to-r from-gray-300 to-gray-500', border: 'border-gray-400', text: 'text-gray-900', medal: '🥈' },
                     { bg: 'bg-gradient-to-r from-orange-400 to-orange-600', border: 'border-orange-500', text: 'text-orange-900', medal: '🥉' },
                   ];
-                  const rankStyle = isTop3 ? rankColors[actualIndex] : { bg: 'bg-white', border: 'border-[#f4e4bc]', text: 'text-[#2c2c2c]', medal: '' };
+                  const rankStyle = isTop3 && player.rank <= 3 ? rankColors[player.rank - 1] : { bg: 'bg-white', border: 'border-[#f4e4bc]', text: 'text-[#2c2c2c]', medal: '' };
                   
                   // 最新に発表された順位のみパルスアニメーションを適用
-                  const isNewlyRevealed = actualIndex + 1 === revealedRank;
+                  const isNewlyRevealed = player.rank === revealedRank;
 
                   return (
                     <div
@@ -283,15 +439,10 @@ function JoinContent() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4">
                           <div className={`text-4xl font-bold ${rankStyle.text}`}>
-                            {isTop3 ? rankStyle.medal : `${actualIndex + 1}位`}
+                            {isTop3 && player.rank <= 3 ? rankStyle.medal : `${player.rank}位`}
                           </div>
                           <div>
                             <p className={`text-2xl font-bold ${rankStyle.text}`}>{player.name}</p>
-                            {isTop3 && (
-                              <p className={`text-lg ${rankStyle.text} opacity-80`}>
-                                {actualIndex === 0 ? '優勝！' : actualIndex === 1 ? '準優勝！' : '3位！'}
-                              </p>
-                            )}
                           </div>
                         </div>
                         <div className="text-right">
@@ -322,7 +473,7 @@ function JoinContent() {
             <div className="grid grid-cols-2 gap-6">
               <button
                 onClick={() => handleAnswer('A')}
-                disabled={hasAnswered || isRevealed}
+                disabled={isRevealed}
                 className={`rounded-lg p-8 text-left transition-all min-h-[150px] ${
                   isRevealed
                     ? currentQuestion.correct_answer === 'A'
@@ -330,11 +481,9 @@ function JoinContent() {
                       : selectedAnswer === 'A'
                         ? 'bg-red-500 text-white shadow-lg scale-105 border-4 border-red-600'
                         : 'bg-gray-200 text-gray-500'
-                    : hasAnswered && selectedAnswer === 'A'
+                    : selectedAnswer === 'A'
                       ? 'bg-[#d4af37] text-white shadow-lg scale-105'
-                      : hasAnswered
-                        ? 'bg-gray-200 text-gray-500'
-                        : 'button-gold text-white hover:scale-105'
+                      : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
                 }`}
               >
                 <div className="mb-3 text-3xl font-bold">A</div>
@@ -349,7 +498,7 @@ function JoinContent() {
 
               <button
                 onClick={() => handleAnswer('B')}
-                disabled={hasAnswered || isRevealed}
+                disabled={isRevealed}
                 className={`rounded-lg p-8 text-left transition-all min-h-[150px] ${
                   isRevealed
                     ? currentQuestion.correct_answer === 'B'
@@ -357,11 +506,9 @@ function JoinContent() {
                       : selectedAnswer === 'B'
                         ? 'bg-red-500 text-white shadow-lg scale-105 border-4 border-red-600'
                         : 'bg-gray-200 text-gray-500'
-                    : hasAnswered && selectedAnswer === 'B'
+                    : selectedAnswer === 'B'
                       ? 'bg-[#d4af37] text-white shadow-lg scale-105'
-                      : hasAnswered
-                        ? 'bg-gray-200 text-gray-500'
-                        : 'button-gold text-white hover:scale-105'
+                      : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
                 }`}
               >
                 <div className="mb-3 text-3xl font-bold">B</div>
@@ -376,7 +523,7 @@ function JoinContent() {
 
               <button
                 onClick={() => handleAnswer('C')}
-                disabled={hasAnswered || isRevealed}
+                disabled={isRevealed}
                 className={`rounded-lg p-8 text-left transition-all min-h-[150px] ${
                   isRevealed
                     ? currentQuestion.correct_answer === 'C'
@@ -384,11 +531,9 @@ function JoinContent() {
                       : selectedAnswer === 'C'
                         ? 'bg-red-500 text-white shadow-lg scale-105 border-4 border-red-600'
                         : 'bg-gray-200 text-gray-500'
-                    : hasAnswered && selectedAnswer === 'C'
+                    : selectedAnswer === 'C'
                       ? 'bg-[#d4af37] text-white shadow-lg scale-105'
-                      : hasAnswered
-                        ? 'bg-gray-200 text-gray-500'
-                        : 'button-gold text-white hover:scale-105'
+                      : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
                 }`}
               >
                 <div className="mb-3 text-3xl font-bold">C</div>
@@ -403,7 +548,7 @@ function JoinContent() {
 
               <button
                 onClick={() => handleAnswer('D')}
-                disabled={hasAnswered || isRevealed}
+                disabled={isRevealed}
                 className={`rounded-lg p-8 text-left transition-all min-h-[150px] ${
                   isRevealed
                     ? currentQuestion.correct_answer === 'D'
@@ -411,11 +556,9 @@ function JoinContent() {
                       : selectedAnswer === 'D'
                         ? 'bg-red-500 text-white shadow-lg scale-105 border-4 border-red-600'
                         : 'bg-gray-200 text-gray-500'
-                    : hasAnswered && selectedAnswer === 'D'
+                    : selectedAnswer === 'D'
                       ? 'bg-[#d4af37] text-white shadow-lg scale-105'
-                      : hasAnswered
-                        ? 'bg-gray-200 text-gray-500'
-                        : 'button-gold text-white hover:scale-105'
+                      : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
                 }`}
               >
                 <div className="mb-3 text-3xl font-bold">D</div>
@@ -429,9 +572,10 @@ function JoinContent() {
               </button>
             </div>
 
-            {hasAnswered && !isRevealed && (
+            {hasAnswered && !isRevealed && selectedAnswer && (
               <div className="rounded-lg bg-[#f4e4bc] p-6 text-center border-2 border-[#d4af37]">
-                <p className="text-2xl font-semibold text-[#b8941f]">回答済み</p>
+                <p className="text-2xl font-semibold text-[#b8941f]">現在の回答: {selectedAnswer}</p>
+                <p className="text-lg text-[#b8941f] mt-2">選択肢は何度でも変更できます</p>
               </div>
             )}
 
